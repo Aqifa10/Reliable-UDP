@@ -9,7 +9,9 @@ Header, 13 bytes, network byte order (big-endian):
     checksum  2 bytes   RFC 1071 checksum of the whole packet, computed with this field set to 0
 """
 
+import socket
 import struct
+import time
 
 HEADER = struct.Struct("!IIBHH")
 HEADER_SIZE = HEADER.size
@@ -68,3 +70,46 @@ def parse_packet(raw: bytes) -> dict | None:
         "flags": flags,
         "payload": raw[HEADER_SIZE:],
     }
+
+
+def split_file(data: bytes) -> list[bytes]:
+    if not data:
+        return [b""]
+
+    return [
+        data[i:i + CHUNK_SIZE]
+        for i in range(0, len(data), CHUNK_SIZE)
+    ]
+
+
+def make_data(seq: int, payload: bytes, last: bool) -> bytes:
+    flags = DATA | FIN if last else DATA
+    return make_packet(seq, 0, flags, payload)
+
+
+def make_ack(n: int) -> bytes:
+    return make_packet(0, n, ACK)
+
+
+def receive(sock: socket.socket, timeout: float):
+    end_time = time.monotonic() + timeout
+
+    while True:
+        remaining = end_time - time.monotonic()
+
+        if remaining <= 0:
+            return None, None
+
+        sock.settimeout(remaining)
+
+        try:
+            raw, addr = sock.recvfrom(65535)
+        except (socket.timeout, TimeoutError):
+            return None, None
+        except ConnectionResetError:
+            continue
+
+        pkt = parse_packet(raw)
+
+        if pkt is not None:
+            return pkt, addr

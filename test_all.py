@@ -29,6 +29,11 @@ def test_packet_flipped_bit_is_rejected():
     assert packet.parse_packet(bytes(raw)) is None
 
 
+def test_packet_split_file():
+    assert packet.split_file(b"") == [b""]
+    assert [len(c) for c in packet.split_file(b"x" * 2500)] == [1024, 1024, 452]
+
+
 def main():
     words = [w for w in sys.argv[1:] if w != "-v"]
 
