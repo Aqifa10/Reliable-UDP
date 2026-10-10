@@ -9,3 +9,17 @@ Header, 13 bytes, network byte order (big-endian):
     checksum  2 bytes   RFC 1071 checksum of the whole packet, computed with this field set to 0
 """
 
+
+def checksum(data: bytes) -> int:
+    if len(data) % 2:
+        data += b"\x00"
+
+    total = 0
+
+    for i in range(0, len(data), 2):
+        total += (data[i] << 8) | data[i + 1]
+
+    while total >> 16:
+        total = (total & 0xFFFF) + (total >> 16)
+
+    return (~total) & 0xFFFF
