@@ -9,6 +9,16 @@ Header, 13 bytes, network byte order (big-endian):
     checksum  2 bytes   RFC 1071 checksum of the whole packet, computed with this field set to 0
 """
 
+import struct
+
+HEADER = struct.Struct("!IIBHH")
+HEADER_SIZE = HEADER.size
+CHUNK_SIZE = 1024
+
+DATA = 0x01
+ACK = 0x02
+FIN = 0x04
+
 
 def checksum(data: bytes) -> int:
     if len(data) % 2:
@@ -23,3 +33,38 @@ def checksum(data: bytes) -> int:
         total = (total & 0xFFFF) + (total >> 16)
 
     return (~total) & 0xFFFF
+
+
+def make_packet(seq: int, ack: int, flags: int,
+                payload: bytes = b"") -> bytes:
+    payload = bytes(payload)
+
+    if len(payload) > CHUNK_SIZE:
+        raise ValueError("Payload exceeds 1024 bytes")
+
+    header = HEADER.pack(seq, ack, flags, len(payload), 0)
+    check = checksum(header + payload)
+
+    return HEADER.pack(seq, ack, flags, len(payload), check) + payload
+
+
+def parse_packet(raw: bytes) -> dict | None:
+    if len(raw) < HEADER_SIZE:
+        return None
+
+    seq, ack, flags, length, received_check = HEADER.unpack_from(raw)
+
+    if length > CHUNK_SIZE or len(raw) != HEADER_SIZE + length:
+        return None
+
+    raw_without_check = raw[:11] + b"\x00\x00" + raw[13:]
+
+    if checksum(raw_without_check) != received_check:
+        return None
+
+    return {
+        "seq": seq,
+        "ack": ack,
+        "flags": flags,
+        "payload": raw[HEADER_SIZE:],
+    }

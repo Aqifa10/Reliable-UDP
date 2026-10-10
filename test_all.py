@@ -18,6 +18,17 @@ def test_packet_checksum_known_value():
     assert packet.checksum(b"\x00\x01\xf2\x03\xf4\xf5\xf6\xf7") == 0x220D  # RFC 1071 example
 
 
+def test_packet_hello_bytes():
+    raw = packet.make_packet(7, 0, packet.DATA | packet.FIN, b"hello")
+    assert raw.hex(" ") == "00 00 00 07 00 00 00 00 05 00 05 23 b5 68 65 6c 6c 6f"
+
+
+def test_packet_flipped_bit_is_rejected():
+    raw = bytearray(packet.make_packet(1, 0, packet.DATA, b"payload"))
+    raw[15] ^= 0x04
+    assert packet.parse_packet(bytes(raw)) is None
+
+
 def main():
     words = [w for w in sys.argv[1:] if w != "-v"]
 
