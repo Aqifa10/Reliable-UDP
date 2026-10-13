@@ -7,10 +7,13 @@ Each section belongs to one person. Your tests fail until you write your
 code; that is expected. Tests use small files and a 2 ms delay so they run fast.
 """
 
+import socket
 import sys
+import threading
 import time
 import traceback
 import packet
+import stopwait
 
 
 # --- Atul: packet.py ---
@@ -32,6 +35,69 @@ def test_packet_flipped_bit_is_rejected():
 def test_packet_split_file():
     assert packet.split_file(b"") == [b""]
     assert [len(c) for c in packet.split_file(b"x" * 2500)] == [1024, 1024, 452]
+
+
+def test_packet_too_short_or_inconsistent_length_rejected():
+    assert packet.parse_packet(b"too_short") is None
+    # Header claims 50 bytes payload, but packet only has 13 bytes total
+    bad_len_header = packet.HEADER.pack(1, 0, packet.DATA, 50, 0)
+    check = packet.checksum(bad_len_header)
+    bad_pkt = packet.HEADER.pack(1, 0, packet.DATA, 50, check)
+    assert packet.parse_packet(bad_pkt) is None
+    # Payload claims > 1024 bytes
+    oversize_header = packet.HEADER.pack(1, 0, packet.DATA, 2000, 0)
+    check_oversize = packet.checksum(oversize_header + b"x" * 2000)
+    oversize_pkt = packet.HEADER.pack(1, 0, packet.DATA, 2000, check_oversize) + b"x" * 2000
+    assert packet.parse_packet(oversize_pkt) is None
+
+
+# --- Atul: stopwait.py receiver edge cases ---
+def test_sw_receiver_duplicate_ack():
+    orig_linger = stopwait.LINGER
+    stopwait.LINGER = 0.05
+    try:
+        recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        recv_sock.bind(("127.0.0.1", 0))
+        r_port = recv_sock.getsockname()[1]
+        received = []
+
+        t = threading.Thread(target=lambda: received.append(stopwait.recv_file(recv_sock, 1)))
+        t.start()
+
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        client.settimeout(0.5)
+
+        # Send packet 0 (DATA)
+        client.sendto(packet.make_data(0, b"chunk0", False), ("127.0.0.1", r_port))
+        ack0_raw, _ = client.recvfrom(1024)
+        ack0 = packet.parse_packet(ack0_raw)
+        assert ack0 is not None and ack0["ack"] == 0
+
+        # Send packet 1 (DATA)
+        client.sendto(packet.make_data(1, b"chunk1", False), ("127.0.0.1", r_port))
+        ack1_raw, _ = client.recvfrom(1024)
+        ack1 = packet.parse_packet(ack1_raw)
+        assert ack1 is not None and ack1["ack"] == 1
+
+        # Resend packet 0 (duplicate old packet): receiver must acknowledge again
+        client.sendto(packet.make_data(0, b"chunk0", False), ("127.0.0.1", r_port))
+        dup_raw, _ = client.recvfrom(1024)
+        dup_ack = packet.parse_packet(dup_raw)
+        assert dup_ack is not None and dup_ack["ack"] == 0
+
+        # Send packet 2 (DATA | FIN)
+        client.sendto(packet.make_data(2, b"chunk2", True), ("127.0.0.1", r_port))
+        fin_raw, _ = client.recvfrom(1024)
+        fin_ack = packet.parse_packet(fin_raw)
+        assert fin_ack is not None and fin_ack["ack"] == 2
+
+        t.join(timeout=1.0)
+        recv_sock.close()
+        client.close()
+
+        assert received[0] == b"chunk0chunk1chunk2"
+    finally:
+        stopwait.LINGER = orig_linger
 
 
 def main():
