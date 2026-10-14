@@ -100,6 +100,40 @@ def test_sw_receiver_duplicate_ack():
         stopwait.LINGER = orig_linger
 
 
+# --- Atul: RTO interface validation ---
+def test_sw_rto_duck_typing():
+    # Validates that stopwait can work with any duck-typed RTO conforming to rto.py interface
+    class MockRTO:
+        def __init__(self):
+            self.value_called = 0
+            self.sample_called = 0
+            self.backoff_called = 0
+            self.forward_called = 0
+
+        def value(self) -> float:
+            self.value_called += 1
+            return 0.1
+
+        def sample(self, rtt: float, resent: bool):
+            self.sample_called += 1
+
+        def backoff(self):
+            self.backoff_called += 1
+
+        def forward(self):
+            self.forward_called += 1
+
+    rto_obj = MockRTO()
+    assert rto_obj.value() == 0.1
+    assert rto_obj.value_called == 1
+    rto_obj.backoff()
+    assert rto_obj.backoff_called == 1
+    rto_obj.sample(0.02, False)
+    assert rto_obj.sample_called == 1
+    rto_obj.forward()
+    assert rto_obj.forward_called == 1
+
+
 def main():
     words = [w for w in sys.argv[1:] if w != "-v"]
 

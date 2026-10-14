@@ -2,8 +2,12 @@
 
 import socket
 import time
+from typing import TYPE_CHECKING
 
 from packet import ACK, DATA, FIN, make_ack, receive
+
+if TYPE_CHECKING:
+    from rto import AdaptiveRTO, FixedRTO
 
 LINGER = 2.0
 IDLE = 30.0
