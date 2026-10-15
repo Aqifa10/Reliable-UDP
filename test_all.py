@@ -134,6 +134,91 @@ def test_sw_rto_duck_typing():
     assert rto_obj.forward_called == 1
 
 
+# --- Atul: stopwait.py sender tests ---
+class SimpleFixedRTO:
+    def __init__(self, val=0.05):
+        self._val = val
+        self.timeouts = 0
+        self.samples = []
+
+    def value(self) -> float:
+        return self._val
+
+    def sample(self, rtt: float, resent: bool):
+        self.samples.append((rtt, resent))
+
+    def backoff(self):
+        self.timeouts += 1
+
+    def forward(self):
+        pass
+
+
+def test_sw_sender_stats_fields():
+    sender_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender_sock.bind(("127.0.0.1", 0))
+
+    responder_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    responder_sock.bind(("127.0.0.1", 0))
+    resp_addr = responder_sock.getsockname()
+
+    def respond():
+        raw, addr = responder_sock.recvfrom(2048)
+        pkt = packet.parse_packet(raw)
+        if pkt is not None:
+            responder_sock.sendto(packet.make_ack(pkt["seq"]), addr)
+
+    t = threading.Thread(target=respond)
+    t.start()
+
+    rto = SimpleFixedRTO(0.1)
+    stats = stopwait.send_file(sender_sock, resp_addr, b"testing stats", 1, rto)
+    t.join(timeout=1.0)
+    sender_sock.close()
+    responder_sock.close()
+
+    for k in ["packets", "sent", "retx", "timeouts", "dup_acks", "seconds"]:
+        assert k in stats, f"Missing key in stats: {k}"
+    assert stats["packets"] == 1
+    assert stats["sent"] == 1
+    assert stats["retx"] == 0
+
+
+def test_sw_old_ack_does_not_reset_deadline():
+    sender_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender_sock.bind(("127.0.0.1", 0))
+
+    responder_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    responder_sock.bind(("127.0.0.1", 0))
+    resp_addr = responder_sock.getsockname()
+
+    def send_old_acks_then_correct():
+        # First receive packet 0
+        raw, addr = responder_sock.recvfrom(2048)
+        # Send an old duplicate ACK for an earlier seq (e.g. 99)
+        time.sleep(0.01)
+        responder_sock.sendto(packet.make_ack(99), addr)
+        # Send another old ACK
+        time.sleep(0.01)
+        responder_sock.sendto(packet.make_ack(99), addr)
+        # Finally send correct ACK
+        time.sleep(0.01)
+        responder_sock.sendto(packet.make_ack(0), addr)
+
+    t = threading.Thread(target=send_old_acks_then_correct)
+    t.start()
+
+    rto = SimpleFixedRTO(0.2)
+    stats = stopwait.send_file(sender_sock, resp_addr, b"old ack test", 1, rto)
+    t.join(timeout=1.0)
+    sender_sock.close()
+    responder_sock.close()
+
+    assert stats["dup_acks"] == 2
+    assert stats["retx"] == 0
+    assert stats["timeouts"] == 0
+
+
 def main():
     words = [w for w in sys.argv[1:] if w != "-v"]
 
