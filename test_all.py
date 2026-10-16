@@ -7,6 +7,7 @@ Each section belongs to one person. Your tests fail until you write your
 code; that is expected. Tests use small files and a 2 ms delay so they run fast.
 """
 
+import hashlib
 import socket
 import sys
 import threading
@@ -14,6 +15,90 @@ import time
 import traceback
 import packet
 import stopwait
+
+
+# --- RTO and Channel test helpers ---
+class SimpleFixedRTO:
+    def __init__(self, val=0.04):
+        self._val = val
+        self.timeouts = 0
+        self.samples = []
+
+    def value(self) -> float:
+        return self._val
+
+    def sample(self, rtt: float, resent: bool):
+        self.samples.append((rtt, resent))
+
+    def backoff(self):
+        self.timeouts += 1
+
+    def forward(self):
+        pass
+
+
+def run(protocol: str, loss: float = 0.0, data: bytes = b"Reliable UDP Stop-and-Wait test data" * 20) -> dict:
+    if protocol == "sw":
+        orig_linger = stopwait.LINGER
+        stopwait.LINGER = 0.05
+        try:
+            recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            recv_sock.bind(("127.0.0.1", 0))
+            r_addr = recv_sock.getsockname()
+
+            send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            send_sock.bind(("127.0.0.1", 0))
+
+            res = []
+            rt = threading.Thread(target=lambda: res.append(stopwait.recv_file(recv_sock, 1)))
+            rt.start()
+
+            if loss > 0:
+                proxy_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                proxy_sock.bind(("127.0.0.1", 0))
+                p_addr = proxy_sock.getsockname()
+                dropped = [False]
+
+                def proxy():
+                    client_addr = None
+                    proxy_sock.settimeout(0.5)
+                    while True:
+                        try:
+                            raw, addr = proxy_sock.recvfrom(65535)
+                        except (socket.timeout, TimeoutError):
+                            break
+                        if addr == r_addr:
+                            if client_addr:
+                                proxy_sock.sendto(raw, client_addr)
+                        else:
+                            client_addr = addr
+                            if not dropped[0]:
+                                dropped[0] = True
+                                continue  # Drop first packet to force retransmission
+                            proxy_sock.sendto(raw, r_addr)
+
+                pt = threading.Thread(target=proxy)
+                pt.start()
+
+                stats = stopwait.send_file(send_sock, p_addr, data, 1, SimpleFixedRTO(0.04))
+                pt.join(timeout=1.0)
+                proxy_sock.close()
+            else:
+                stats = stopwait.send_file(send_sock, r_addr, data, 1, SimpleFixedRTO(0.04))
+
+            rt.join(timeout=1.0)
+            recv_sock.close()
+            send_sock.close()
+
+            received_data = res[0] if res else b""
+            stats["sha256_ok"] = (
+                hashlib.sha256(received_data).digest() == hashlib.sha256(data).digest()
+            )
+            return stats
+        finally:
+            stopwait.LINGER = orig_linger
+
+    raise NotImplementedError(f"Protocol {protocol} not implemented yet")
 
 
 # --- Atul: packet.py ---
@@ -135,25 +220,6 @@ def test_sw_rto_duck_typing():
 
 
 # --- Atul: stopwait.py sender tests ---
-class SimpleFixedRTO:
-    def __init__(self, val=0.05):
-        self._val = val
-        self.timeouts = 0
-        self.samples = []
-
-    def value(self) -> float:
-        return self._val
-
-    def sample(self, rtt: float, resent: bool):
-        self.samples.append((rtt, resent))
-
-    def backoff(self):
-        self.timeouts += 1
-
-    def forward(self):
-        pass
-
-
 def test_sw_sender_stats_fields():
     sender_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sender_sock.bind(("127.0.0.1", 0))
@@ -217,6 +283,27 @@ def test_sw_old_ack_does_not_reset_deadline():
     assert stats["dup_acks"] == 2
     assert stats["retx"] == 0
     assert stats["timeouts"] == 0
+
+
+# --- Atul: Stop-and-Wait end-to-end integration tests ---
+def test_sw_clean():
+    res = run("sw")
+    assert res["retx"] == 0
+    assert res["sha256_ok"] is True
+
+
+def test_sw_loss():
+    res = run("sw", loss=0.1)
+    assert res["retx"] > 0
+    assert res["sha256_ok"] is True
+
+
+def test_sw_empty_file_transfer():
+    res = run("sw", data=b"")
+    assert res["packets"] == 1
+    assert res["sent"] == 1
+    assert res["retx"] == 0
+    assert res["sha256_ok"] is True
 
 
 def main():
