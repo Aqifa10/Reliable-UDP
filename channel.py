@@ -1,6 +1,8 @@
 """channel.py: network channel simulator with loss, corruption, delay, and reordering. Owner: Archit."""
 
+import hashlib
 import random
+import struct
 
 
 class Channel:
@@ -14,21 +16,37 @@ class Channel:
         self.rate = rate
         self.seed = seed
         self.rng = random.Random(seed)
+        self.attempts = {}
+
+    def _decide(self, salt: str, seq: int, attempt: int, p: float) -> bool:
+        """Deterministic impairment decision using seeded blake2b hash."""
+        if self.seed is None:
+            return self.rng.random() < p
+        key = f"{self.seed}|{salt}|{seq}|{attempt}".encode()
+        h = hashlib.blake2b(key, digest_size=8).digest()
+        val = int.from_bytes(h, "big") / (2**64)
+        return val < p
 
     def damage(self, data: bytes, direction: str = "to_receiver") -> list[bytes]:
         if not data:
             return []
 
-        if self.loss > 0 and self.rng.random() < self.loss:
+        seq = 0
+        if len(data) >= 4:
+            seq = struct.unpack("!I", data[:4])[0]
+        attempt = self.attempts.get(seq, 0) + 1
+        self.attempts[seq] = attempt
+
+        if self.loss > 0 and self._decide("loss", seq, attempt, self.loss):
             return []
 
         pkt = bytearray(data)
-        if self.corrupt > 0 and len(pkt) > 0 and self.rng.random() < self.corrupt:
+        if self.corrupt > 0 and len(pkt) > 0 and self._decide("corrupt", seq, attempt, self.corrupt):
             idx = self.rng.randint(0, len(pkt) - 1)
             pkt[idx] ^= 0xFF
 
         res = [bytes(pkt)]
-        if self.dup > 0 and self.rng.random() < self.dup:
+        if self.dup > 0 and self._decide("dup", seq, attempt, self.dup):
             res.append(bytes(pkt))
 
         return res
